@@ -1,1 +1,2 @@
 Detections for Windows environments
+Grouped by MITRE tactic
