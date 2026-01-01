@@ -1,1 +1,121 @@
+id: "DET-AWS-0001"
+title: "AWS suspicious security change (IAM + logging tamper)"
+description: >
+  Detects potentially malicious AWS security configuration changes commonly used by attackers:
+  IAM policy/role changes, access key creation, user/role privilege changes, and CloudTrail/Config/GuardDuty
+  disabling or modification events. Requires AWS CloudTrail logs.
 
+
+logsource:
+  product: "aws"
+  service: "cloudtrail"
+  category: "security_change"
+
+severity: "high:
+risk_score: 85
+
+mitre_attack:
+  tactic: "Defense Evasion"
+  technique:
+    - id: "T1562"
+      name: "Impair Defenses"
+  additional_techniques:
+    - id: "T1098"
+      name: "Account Manipulation"
+    - id: "T1136"
+      name: "Create Account"
+    - id: "T1078"
+      name: "Valid Accounts"
+
+
+false_positives:
+  - "Approved IAM admin changes during maintenance windows"
+  - "Automation tools (Terraform/CloudFormation) making expected changes"
+  - "Security team rotating access keys or enabling/disabling controls for testing"
+
+  
+references:
+  - "https://attack.mitre.org/techniques/T1562/"
+  - "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference.html"
+
+ tags:
+  - "aws"
+  - "cloudtrail"
+  - "iam"
+  - "defense_evasion"
+  - "account_manipulation"
+
+
+query:
+  language: "splunk_spl"
+  content: |
+    index=aws_cloudtrail sourcetype=aws:cloudtrail
+    (
+      /* IAM privilege / access changes */
+      eventName IN (
+        "AttachUserPolicy","DetachUserPolicy","PutUserPolicy","DeleteUserPolicy",
+        "AttachRolePolicy","DetachRolePolicy","PutRolePolicy","DeleteRolePolicy",
+        "CreatePolicy","CreatePolicyVersion","DeletePolicy","DeletePolicyVersion","SetDefaultPolicyVersion",
+        "UpdateAssumeRolePolicy",
+        "AddUserToGroup","RemoveUserFromGroup",
+        "CreateAccessKey","UpdateAccessKey","DeleteAccessKey",
+        "CreateLoginProfile","UpdateLoginProfile","DeleteLoginProfile",
+        "CreateUser","DeleteUser","UpdateUser",
+        "CreateRole","DeleteRole","UpdateRole",
+        "PutGroupPolicy","DeleteGroupPolicy",
+        "PutRolePermissionsBoundary","PutUserPermissionsBoundary","DeleteRolePermissionsBoundary","DeleteUserPermissionsBoundary"
+      )
+      OR
+      /* Logging / monitoring tamper */
+      eventName IN (
+        "StopLogging","DeleteTrail","UpdateTrail",
+        "PutEventSelectors","DeleteEventDataStore","UpdateEventDataStore",
+        "PutInsightSelectors",
+        "PutConfigurationRecorder","StopConfigurationRecorder","DeleteConfigurationRecorder",
+        "DeleteDeliveryChannel","PutDeliveryChannel",
+        "DeleteDetector","UpdateDetector",
+        "DeleteMembers","DisassociateFromMasterAccount","DisassociateMembers"
+      )
+    )
+    | eval actor=coalesce(userIdentity.arn, userIdentity.userName, userIdentity.principalId)
+    | eval src_ip=coalesce(sourceIPAddress, src_ip)
+    | eval user_agent=coalesce(userAgent, user_agent)
+    | eval aws_region=coalesce(awsRegion, region)
+    | eval account_id=coalesce(recipientAccountId, userIdentity.accountId)
+    | eval error=coalesce(errorCode, "none")
+    | stats
+        count as event_count
+        values(eventName) as actions
+        values(eventSource) as services
+        values(src_ip) as src_ips
+        values(user_agent) as user_agents
+        values(error) as errors
+        min(_time) as firstTime
+        max(_time) as lastTime
+      by account_id, aws_region, actor
+    | where event_count >= 1
+
+
+    
+response:
+  playbook: "aws_suspicious_security_change_v1"
+  runbook_url: "https://internal/runbooks/aws-security-change"
+
+  
+  
+fields_required:
+  - "eventName"
+  - "eventSource"
+  - "userIdentity"
+  - "sourceIPAddress"
+  - "awsRegion"
+  - "recipientAccountId"
+
+tuning:
+  recommended_allowlist:
+    - "CI/CD roles (Terraform, CloudFormation) by role ARN"
+    - "Known admin break-glass roles"
+  notes: >
+    Add allowlisting for expected automation roles and maintenance windows.
+    Increase severity if actions include StopLogging/DeleteTrail or CreateAccessKey
+    by a user who does not normally perform IAM administration.
